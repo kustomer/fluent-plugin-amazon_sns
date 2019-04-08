@@ -1,4 +1,4 @@
-require "aws-sdk-v1"
+require "aws-sdk-sns"
 
 module Fluent
   class AmazonSNSOutput < BufferedOutput
@@ -38,16 +38,16 @@ module Fluent
                          end
 
       options = {}
-      [:access_key_id, :secret_access_key, :region, :proxy_uri].each do |key|
+      [:access_key_id, :secret_access_key, :region].each do |key|
         options[key] = instance_variable_get "@aws_#{key}"
       end
-
-      AWS.config(options)
+      
+      Aws.config[options]
     end
 
     def start
       super
-      @sns = AWS::SNS.new
+      @sns = Aws::SNS::Client.new
       @topics = get_topics
     end
 
@@ -64,18 +64,35 @@ module Fluent
         record["time"] = Time.at(time).localtime
         subject = record.delete(@subject_key) || @subject  || 'Fluent-Notification'
         topic = @topic_generator.call(tag, record)
-        topic = topic.gsub(/\./, '-') if topic # SNS doesn't allow .
+        topic = topic.gsub(/\./, '-') if topic # SNS doesn't allow
         if @topics[topic]
-          @topics[topic].publish(record.to_json, subject: subject)
+          # @topics[topic].publish(record.to_json, subject: subject)
+          @sns.publish({
+            topic_arn: @topics[topic],
+            subject: subject,
+            message: record.to_json,
+          })
         else
           $log.error "Could not find topic '#{topic}' on SNS"
         end
       end
     end
 
+    def paginate_topics(next_token = nil, topics = [])
+      resp = @sns.list_topics({
+        next_token: next_token
+      })
+      if resp[:next_token]
+        paginate_topics(resp[:next_token], topics + resp[:topics])
+      else
+        topics + resp[:topics]
+      end
+    end
+
     def get_topics()
-      @sns.topics.inject({}) do |product, topic|
-        product[topic.name] = topic
+      paginate_topics(nil, []).inject({}) do |product, topic|
+        topic_name = topic[:topic_arn].rpartition(':').last
+        product[topic_name] = topic[:topic_arn]
         product
       end
     end
