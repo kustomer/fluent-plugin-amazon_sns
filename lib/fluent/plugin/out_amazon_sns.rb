@@ -42,7 +42,7 @@ module Fluent
         options[key] = instance_variable_get "@aws_#{key}"
       end
       
-      Aws.config(options)
+      Aws.config[options]
     end
 
     def start
