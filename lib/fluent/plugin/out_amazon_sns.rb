@@ -41,7 +41,7 @@ module Fluent
       [:access_key_id, :secret_access_key, :region].each do |key|
         options[key] = instance_variable_get "@aws_#{key}"
       end
-      
+
       Aws.config[options]
     end
 
@@ -57,6 +57,22 @@ module Fluent
 
     def format(tag, time, record)
       [tag, time, record].to_msgpack
+    end
+
+    def get_retry(attempt)
+      case attempt
+      when 1
+        retry_time = 1
+      when 2
+        retry_time = 10
+      when 3
+        retry_time = 60
+      when 4
+        retry_time = 300
+      when 5
+        retry_time = 600
+      end
+      retry_time
     end
 
     def write(chunk)
@@ -78,19 +94,33 @@ module Fluent
       end
     end
 
-    def paginate_topics(next_token = nil, topics = [])
-      resp = @sns.list_topics({
-        next_token: next_token
-      })
-      if resp[:next_token]
-        paginate_topics(resp[:next_token], topics + resp[:topics])
+    def paginate_topics(next_token = nil, topics = [], attempt = 1)
+      begin
+        resp = @sns.list_topics({
+          next_token: next_token
+        })
+      rescue Aws::SNS::Errors::Throttling
+        retry_time = get_retry(attempt)
+
+        if !retry_time
+          $log.error "Failed to retrieve topics after #{attempt} attempts, exiting"
+          exit 1
+        end
+
+        $log.error "Encountered rate limit from aws api, retrying in #{retry_time} seconds"
+        sleep retry_time
+        paginate_topics(next_token, topics, attempt + 1)
       else
-        topics + resp[:topics]
+        if resp[:next_token]
+          paginate_topics(resp[:next_token], topics + resp[:topics], 1)
+        else
+          topics + resp[:topics]
+        end
       end
     end
 
     def get_topics()
-      paginate_topics(nil, []).inject({}) do |product, topic|
+      paginate_topics(nil, [], 1).inject({}) do |product, topic|
         topic_name = topic[:topic_arn].rpartition(':').last
         product[topic_name] = topic[:topic_arn]
         product
